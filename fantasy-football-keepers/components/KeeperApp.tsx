@@ -13,6 +13,8 @@ function logo(team: string) { return `https://a.espncdn.com/i/teamlogos/nfl/500/
 export default function KeeperApp() {
   const teamNames = Object.keys(rosters) as TeamName[];
   const [team, setTeam] = useState<TeamName | "">("");
+  const [pin, setPin] = useState("");
+  const [authenticated, setAuthenticated] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [saved, setSaved] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -32,18 +34,29 @@ export default function KeeperApp() {
       }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    if (!team) { setSelected([]); setSaved([]); return; }
+  async function unlockTeam() {
+    if (!team || pin.length !== 4) return;
     setLoading(true); setMessage("");
-    fetch(`/api/submission?team=${encodeURIComponent(team)}`)
-      .then(r => r.json())
-      .then(data => {
-        const keepers = Array.isArray(data.keepers) ? data.keepers : [];
-        setSelected(keepers); setSaved(keepers);
-      })
-      .catch(() => setMessage("Could not load the current submission."))
-      .finally(() => setLoading(false));
-  }, [team]);
+    try {
+      const res = await fetch(`/api/submission?team=${encodeURIComponent(team)}&pin=${encodeURIComponent(pin)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not unlock team.");
+      const keepers = Array.isArray(data.keepers) ? data.keepers : [];
+      setSelected(keepers); setSaved(keepers); setAuthenticated(true);
+    } catch (e) {
+      setAuthenticated(false);
+      setMessage(e instanceof Error ? e.message : "Incorrect team PIN.");
+    } finally { setLoading(false); }
+  }
+
+  function chooseTeam(value: TeamName | "") {
+    setTeam(value);
+    setPin("");
+    setAuthenticated(false);
+    setSelected([]);
+    setSaved([]);
+    setMessage("");
+  }
 
   const roster = team ? rosters[team] : [];
   const points = useMemo(() => roster.filter(p => selected.includes(p.name)).reduce((s,p) => s + p.points, 0), [roster, selected]);
@@ -62,7 +75,7 @@ export default function KeeperApp() {
     if (!team || selected.length === 0) return;
     setLoading(true); setMessage("");
     try {
-      const res = await fetch("/api/submission", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ team, keepers: selected }) });
+      const res = await fetch("/api/submission", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ team, pin, keepers: selected }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Submission failed");
       setSaved(selected); setMessage("Saved. You can come back and change these anytime.");
@@ -76,35 +89,23 @@ export default function KeeperApp() {
 
     <section className="panel team-panel">
       <label htmlFor="team">YOUR TEAM</label>
-      <select id="team" value={team} onChange={e => setTeam(e.target.value as TeamName | "")}>
+      <select id="team" value={team} onChange={e => chooseTeam(e.target.value as TeamName | "")}>
         <option value="">Select a team…</option>{teamNames.map(t => <option key={t}>{t}</option>)}
       </select>
+      {team && !authenticated && <div className="pin-row">
+        <input aria-label="4 digit team PIN" inputMode="numeric" autoComplete="one-time-code" maxLength={4} placeholder="4-digit PIN" value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))} onKeyDown={e => { if (e.key === "Enter") unlockTeam(); }} />
+        <button type="button" disabled={loading || pin.length !== 4} onClick={unlockTeam}>{loading ? "Checking…" : "Unlock team"}</button>
+      </div>}
     </section>
 
-    {team && <>
-      <div className="scorebar">
-        <div><span className="score-label">KEEPERS</span><strong>{selected.length}<em> / {MAX_KEEPERS}</em></strong></div>
-        <div className="score-main"><span className="score-label">POINTS USED</span><strong>{points}<em> / {MAX_POINTS}</em></strong></div>
-        <div><span className="score-label">REMAINING</span><strong className={remaining <= 1 ? "warn" : ""}>{remaining}</strong></div>
-      </div>
+    {team && authenticated && <>
+      <div className="scorebar"><div><span className="score-label">KEEPERS</span><strong>{selected.length}<em> / {MAX_KEEPERS}</em></strong></div><div className="score-main"><span className="score-label">POINTS USED</span><strong>{points}<em> / {MAX_POINTS}</em></strong></div><div><span className="score-label">REMAINING</span><strong className={remaining <= 1 ? "warn" : ""}>{remaining}</strong></div></div>
       <div className="meter"><div style={{width:`${Math.min(100,(points/MAX_POINTS)*100)}%`}} /></div>
-
       {saved.length > 0 && <div className="saved-note">Current submission loaded. Make changes below and hit <b>Update keepers</b>.</div>}
       <section className="roster">
-        <div className="roster-head"><div><span>ROSTER</span><h2>{team}</h2></div><span className="hint">Tap a player to select</span></div>
-        <div className="players">{roster.map(player => {
-          const active = selected.includes(player.name);
-          const s = sleeper[normalize(player.name)];
-          const headshot = s?.player_id ? `https://sleepercdn.com/content/nfl/players/thumb/${s.player_id}.jpg` : null;
-          return <button type="button" onClick={() => toggle(player.name)} key={player.name} className={`player ${active ? "active" : ""}`}>
-            <div className="portrait">{headshot ? <img src={headshot} alt="" onError={e => { e.currentTarget.style.display='none'; }} /> : null}<img className="team-logo" src={logo(player.nflTeam)} alt="" /></div>
-            <div className="player-info"><div className="name-row"><b>{player.name}</b><span>{player.position} · {player.nflTeam}</span></div><small>{player.draft === "-" ? "Free agent" : player.draft}</small></div>
-            <div className="points"><b>{player.points}</b><span>{player.points === 1 ? "PT" : "PTS"}</span></div>
-            <div className="check">{active ? "✓" : "+"}</div>
-          </button>
-        })}</div>
+        <div className="roster-head"><div><span>ROSTER</span><h2>{team}</h2></div><button className="change-team" type="button" onClick={() => { setAuthenticated(false); setPin(""); setSelected([]); setSaved([]); }}>Lock / change PIN</button></div>
+        <div className="players">{roster.map(player => { const active = selected.includes(player.name); const s = sleeper[normalize(player.name)]; const headshot = s?.player_id ? `https://sleepercdn.com/content/nfl/players/thumb/${s.player_id}.jpg` : null; return <button type="button" onClick={() => toggle(player.name)} key={player.name} className={`player ${active ? "active" : ""}`}><div className="portrait">{headshot ? <img src={headshot} alt="" onError={e => { e.currentTarget.style.display='none'; }} /> : null}<img className="team-logo" src={logo(player.nflTeam)} alt="" /></div><div className="player-info"><div className="name-row"><b>{player.name}</b><span>{player.position} · {player.nflTeam}</span></div><small>{player.draft === "-" ? "Free agent" : player.draft}</small></div><div className="points"><b>{player.points}</b><span>{player.points === 1 ? "PT" : "PTS"}</span></div><div className="check">{active ? "✓" : "+"}</div></button> })}</div>
       </section>
-
       <div className="sticky-submit"><div><b>{points} / {MAX_POINTS} points</b><span>{selected.length} keeper{selected.length === 1 ? "" : "s"} selected</span></div><button disabled={loading || selected.length === 0 || !dirty} onClick={submit}>{loading ? "Saving…" : saved.length ? "Update keepers" : "Submit keepers"}</button></div>
       {message && <div className={`toast ${message.startsWith("Saved") ? "success" : ""}`}>{message}</div>}
     </>}
